@@ -14,14 +14,19 @@ It is based on the scientific article
 
 ## Requirements
 
-The python libraries used in this code are:
+The python libraries used in this code are listed below.
+For quick installation of all these packages, use 
 
-* numpy: `pip3 install numpy`
-* matplotlib: `pip3 install matplotlib`
-* scipy: `pip3 install scipy`
-* pylie: <https://github.com/pvangoor/pylie>
-* pymavlink: `pip3 install pymavlink` *Not required for simulation.*
-* progressbar2: `pip3 install progressbar2` *Not required.*
+```commandline
+pip install numpy matplotlib scipy pylieg pymavlink progressbar2
+```
+
+* numpy: `pip install numpy`
+* matplotlib: `pip install matplotlib`
+* scipy: `pip install scipy`
+* pylie: `pip install pylieg`
+* pymavlink: `pip install pymavlink` *Not required for simulation.*
+* progressbar2: `pip install progressbar2` *Not required.*
 
 ## Usage
 
