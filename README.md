@@ -4,11 +4,16 @@ This code is an implementation of a synchronous observer design that can be used
 It is based on the scientific article
 
 ```latex
-@article{van2023synchronous,
-  title={Synchronous observer design for inertial navigation systems with almost-global convergence},
-  author={van Goor, Pieter and Hamel, Tarek and Mahony, Robert},
-  journal={arXiv preprint arXiv:2311.02234},
-  year={2023}
+@article{van2025synchronous,
+  title = {Synchronous observer design for Inertial Navigation Systems with almost-global convergence},
+  journal = {Automatica},
+  volume = {177},
+  pages = {112328},
+  year = {2025},
+  issn = {0005-1098},
+  doi = {https://doi.org/10.1016/j.automatica.2025.112328},
+  url = {https://www.sciencedirect.com/science/article/pii/S0005109825002213},
+  author = {Pieter {van Goor} and Tarek Hamel and Robert Mahony},
 }
 ```
 
