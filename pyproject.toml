@@ -6,6 +6,7 @@ dependencies = [
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.4",
+    "progressbar2>=4.5.0",
     "pylieg>=0.2.3",
     "pymavlink>=2.4.49",
     "scipy>=1.16.3",
