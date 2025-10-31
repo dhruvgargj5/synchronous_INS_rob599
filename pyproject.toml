@@ -1,0 +1,12 @@
+[project]
+name = "synchronous-ins-rob599"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.1.0",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pylieg>=0.2.3",
+    "pymavlink>=2.4.49",
+    "scipy>=1.16.3",
+]
