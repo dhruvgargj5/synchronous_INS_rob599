@@ -24,15 +24,15 @@ import tqdm
 df = pd.read_csv('combined_data.csv')
 
 extreme_initial = False
-sim_speed_multiplier = 1
-time_lim = len(df) / sim_speed_multiplier
+sim_speed_multiplier : int = 10
+time_lim = len(df)
 
 if extreme_initial:
     print("The initial condition is set to extreme.")
 else:
     print("The initial condition is set to standard.")
 
-dt = 0.001 * sim_speed_multiplier
+dt = 0.001
 max_steps = int(time_lim)
 
 figheight = 2.5
@@ -79,42 +79,38 @@ observer_list = [
 ]
 
 
-circle_frequency = 0.5
-def velocity_gen(t, X):
-    omega = np.reshape([0, 0, circle_frequency], (3, 1))
-    g = 0 * np.reshape([0, 0, 1], (3, 1))
-    a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
+# circle_frequency = 0.5
+# def velocity_gen(t, X):
+#     omega = np.reshape([0, 0, circle_frequency], (3, 1))
+#     g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+#     a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
 
-    U = np.block([
-        [SO3.skew(omega), a, np.zeros((3, 1))],
-        [np.zeros((2, 5))]
-    ])
-    G = np.block([
-        [np.zeros((3, 3)), g, np.zeros((3, 1))],
-        [np.zeros((2, 5))]
-    ])
-    N = np.block([
-        [np.zeros((3, 3)), np.zeros((3, 2))],
-        [np.zeros((1, 3)), 0, -1],
-        [np.zeros((1, 3)), 0, 0]
-    ])
+#     U = np.block([
+#         [SO3.skew(omega), a, np.zeros((3, 1))],
+#         [np.zeros((2, 5))]
+#     ])
+#     G = np.block([
+#         [np.zeros((3, 3)), g, np.zeros((3, 1))],
+#         [np.zeros((2, 5))]
+#     ])
+#     N = np.block([
+#         [np.zeros((3, 3)), np.zeros((3, 2))],
+#         [np.zeros((1, 3)), 0, -1],
+#         [np.zeros((1, 3)), 0, 0]
+#     ])
 
-    return U, G, N
+#     return U, G, N
 
 
 def run_once(observer_list):
     X = np.eye(5)
-    initial_distance = 50.0
-    X[1,3] = circle_frequency*initial_distance
-    X[0,4] = initial_distance
-
     initial_condition = X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
     if extreme_initial:
         initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
         initial_condition[0:3,3] += [2,2,0]
         initial_condition[0:3,4] += [1,1,0]
-        print("Initial Condition:")
-        print(initial_condition)
+    print("Initial Condition:")
+    print(initial_condition)
     
     for obs in observer_list:
         obs.obs.set_IC(initial_condition)
@@ -122,11 +118,11 @@ def run_once(observer_list):
 
     statesTru = []
     #### ROB599 Custom
-    for step in tqdm.tqdm(range(max_steps)):
+    for step in tqdm.tqdm(range(0, max_steps,sim_speed_multiplier)):
         row = df.iloc[step]
         omega = row[
             [f"imu_angular_vel_{d}" for d in ["x", "y", "z"]]
-        ].to_numpy()
+        ].to_numpy().reshape(3, 1)
         omega_skewed = SO3.skew(omega)
         imu_accel = (
             row[[f"imu_linear_acc_{d}" for d in ["x", "y", "z"]]]
@@ -139,7 +135,7 @@ def run_once(observer_list):
                 [np.zeros((2, 5))],
             ]
         )
-        g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+        g = 0 * np.reshape([0, 0, 1], (3, 1))
         G = np.block(
             [
                 [np.zeros((3, 3)), g, np.zeros((3, 1))],
@@ -173,14 +169,14 @@ def run_once(observer_list):
 
     return statesTru, observer_list
 
-times = [dt * step for step in range(max_steps)]
+times = [dt * step for step in range(0, max_steps,sim_speed_multiplier)]
 statesTru, observer_list = run_once(observer_list)
 
 # Plot the error statistics
 
 fig, ax = plt.subplots()
-x = df['odom_pose_x'].to_numpy()
-y = df['odom_pose_y'].to_numpy()
+x = df['odom_pose_x'].to_numpy()[::sim_speed_multiplier]
+y = df['odom_pose_y'].to_numpy()[::sim_speed_multiplier]
 
 ax.plot(times, x, label='x')
 ax.plot(times, y, label='y')
@@ -188,7 +184,7 @@ ax.legend()
 ax.set_title('odom x y pos over time')
 
 fig, ax = plt.subplots()
-sc = ax.scatter(df['odom_pose_x'], df['odom_pose_y'], 
+sc = ax.scatter(x,y,
                 c=times, s=5)
 plt.colorbar(sc, label='time (s)')
 ax.set_xlabel('X')
