@@ -16,7 +16,7 @@ plt.rc('lines', linewidth=1.0)
 plt.rc('text', usetex=True)
 plt.rc('font', family='serif')
 
-np.random.seed(0)
+np.random.seed(5992)
 
 import pandas as pd
 import tqdm
@@ -32,7 +32,7 @@ if extreme_initial:
 else:
     print("The initial condition is set to standard.")
 
-dt = 0.001
+dt = 0.001 * sim_speed_multiplier
 max_steps = int(time_lim)
 
 figheight = 2.5
@@ -54,8 +54,8 @@ class ObserverInfo:
     states_aux : list = field(default_factory=list)
 
 # Standard gains
-kp = 10.0
-kv = 10.0
+kp = 2.0
+kv = 0.5
 kc = 0.1
 kd = 0.1
 km = 2.0
@@ -104,20 +104,36 @@ observer_list = [
 
 def run_once(observer_list):
     X = np.eye(5)
-    initial_condition = X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
+    orient_quat = df.iloc[0][[f"odom_orientation_{d}" for d in ["x", "y", "z", "w"]]]
+    X[:3,:3] = SO3.from_list(orient_quat.tolist(), format_spec='q').as_matrix()
+    X[0:3,3:4] = 0 # zero vel
+    X[0:3,4:5] = df.iloc[0][[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)
+    make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
+    initial_condition = make_initial_condition(X)
     if extreme_initial:
         initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
         initial_condition[0:3,3] += [2,2,0]
         initial_condition[0:3,4] += [1,1,0]
     print("Initial Condition:")
+    print(f"Rotation mat = {X[:3, :3]}")
+    print(f"Vel  = {X[:3, 3]}")
+    print(f"Pos = {X[:3, 4]}")
+    print(f"Full state: ")
     print(initial_condition)
     
     for obs in observer_list:
         obs.obs.set_IC(initial_condition)
         obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
 
-    statesTru = []
+    statesTru = []    
     #### ROB599 Custom
+    g = 0 * np.reshape([0, 0, 1], (3, 1))
+    G = np.block(
+        [
+            [np.zeros((3, 3)), g, np.zeros((3, 1))],
+            [np.zeros((2, 5))],
+        ]
+    )    
     for step in tqdm.tqdm(range(0, max_steps,sim_speed_multiplier)):
         row = df.iloc[step]
         omega = row[
@@ -135,13 +151,6 @@ def run_once(observer_list):
                 [np.zeros((2, 5))],
             ]
         )
-        g = 0 * np.reshape([0, 0, 1], (3, 1))
-        G = np.block(
-            [
-                [np.zeros((3, 3)), g, np.zeros((3, 1))],
-                [np.zeros((2, 5))],
-            ]
-        )
         N = np.block(
             [
                 [np.zeros((3, 3)), np.zeros((3, 2))],
@@ -149,15 +158,23 @@ def run_once(observer_list):
                 [np.zeros((1, 3)), 0, 0],
             ]
         )
-        pos_true = X[0:3, 4:5].copy()
-        vel_true = X[0:3, 3:4].copy()
+
+        gps_pos = row[[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)
+        gps_vel = np.zeros((3,1))
+        if step > 0:
+            gps_vel = (gps_pos - df.iloc[step-1][[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)) /(dt / sim_speed_multiplier)
         mag_true = X[0:3, 0:3].T @ m0
         #### ROB599 Custom
-        X = expm(dt * (G + N)) @ X @ expm(dt * (U - N))
+        # X = expm(dt * (G + N)) @ X @ expm(dt * (U - N))
+        X = np.eye(5)
+        orient_quat = row[[f"odom_orientation_{d}" for d in ["x", "y", "z", "w"]]]
+        X[:3,:3] = SO3.from_list(orient_quat.tolist(), format_spec='q').as_matrix()
+        X[0:3,3:4] = gps_vel
+        X[0:3,4:5] = gps_pos
         gyr, acc = SO3.vex(U[0:3,0:3]), U[0:3,3:4]
 
         for obs_data in observer_list:
-            obs_data.obs.GPS_update(pos_true, vel_true)
+            obs_data.obs.GPS_update(gps_pos, gps_vel)
             obs_data.obs.compass_update(mag_true, m0)
             obs_data.obs.integrate_dynamics(gyr, acc, dt)
 
@@ -166,22 +183,14 @@ def run_once(observer_list):
 
         # Gather information
         statesTru.append(X.copy())
-
     return statesTru, observer_list
 
-times = [dt * step for step in range(0, max_steps,sim_speed_multiplier)]
+times = [(dt / sim_speed_multiplier) * step for step in range(0, max_steps,sim_speed_multiplier)]
 statesTru, observer_list = run_once(observer_list)
 
-# Plot the error statistics
 
-fig, ax = plt.subplots()
 x = df['odom_pose_x'].to_numpy()[::sim_speed_multiplier]
 y = df['odom_pose_y'].to_numpy()[::sim_speed_multiplier]
-
-ax.plot(times, x, label='x')
-ax.plot(times, y, label='y')
-ax.legend()
-ax.set_title('odom x y pos over time')
 
 fig, ax = plt.subplots()
 sc = ax.scatter(x,y,
@@ -192,7 +201,7 @@ ax.set_ylabel('Y')
 ax.set_title('XY Trajectory Colored by Time')
 ax.axis('equal')
 
-
+# Plot the error statistics
 fig, ax = plt.subplots(4, 1, layout='constrained')
 fig.set_figwidth(3.5*figsize_factor)
 fig.set_figheight(figheight*figsize_factor)
@@ -258,8 +267,6 @@ fig2.set_figheight(3/4*figheight*figsize_factor)
 eul_tru = np.vstack([SO3.from_matrix(XTru[0:3,0:3]).as_euler() for XTru in statesTru]).T
 vel_tru = np.hstack([XTru[0:3,3:4] for XTru in statesTru])
 pos_tru = np.hstack([XTru[0:3,4:5] for XTru in statesTru])
-
-
 for i in range(3):
     for obs in observer_list:
         eul_est = np.vstack([SO3.from_matrix(XEst[0:3,0:3]).as_euler() for XEst in obs.states_est]).T
