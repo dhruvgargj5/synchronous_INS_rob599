@@ -23,15 +23,16 @@ import tqdm
 
 df = pd.read_csv('combined_data.csv')
 
-extreme_initial = True
-time_lim = len(df)
+extreme_initial = False
+sim_speed_multiplier = 1
+time_lim = len(df) / sim_speed_multiplier
 
 if extreme_initial:
     print("The initial condition is set to extreme.")
 else:
     print("The initial condition is set to standard.")
 
-dt = 0.001
+dt = 0.001 * sim_speed_multiplier
 max_steps = int(time_lim)
 
 figheight = 2.5
@@ -81,7 +82,7 @@ observer_list = [
 circle_frequency = 0.5
 def velocity_gen(t, X):
     omega = np.reshape([0, 0, circle_frequency], (3, 1))
-    g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+    g = 0 * np.reshape([0, 0, 1], (3, 1))
     a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
 
     U = np.block([
@@ -110,8 +111,8 @@ def run_once(observer_list):
     initial_condition = X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
     if extreme_initial:
         initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
-        initial_condition[0:3,3] += [2,2,2]
-        initial_condition[0:3,4] += [1,1,1]
+        initial_condition[0:3,3] += [2,2,0]
+        initial_condition[0:3,4] += [1,1,0]
         print("Initial Condition:")
         print(initial_condition)
     
@@ -176,6 +177,25 @@ times = [dt * step for step in range(max_steps)]
 statesTru, observer_list = run_once(observer_list)
 
 # Plot the error statistics
+
+fig, ax = plt.subplots()
+x = df['odom_pose_x'].to_numpy()
+y = df['odom_pose_y'].to_numpy()
+
+ax.plot(times, x, label='x')
+ax.plot(times, y, label='y')
+ax.legend()
+ax.set_title('odom x y pos over time')
+
+fig, ax = plt.subplots()
+sc = ax.scatter(df['odom_pose_x'], df['odom_pose_y'], 
+                c=times, s=5)
+plt.colorbar(sc, label='time (s)')
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_title('XY Trajectory Colored by Time')
+ax.axis('equal')
+
 
 fig, ax = plt.subplots(4, 1, layout='constrained')
 fig.set_figwidth(3.5*figsize_factor)
