@@ -18,16 +18,21 @@ plt.rc('font', family='serif')
 
 np.random.seed(0)
 
+import pandas as pd
+import tqdm
+
+df = pd.read_csv('combined_data.csv')
+
 extreme_initial = True
-time_lim = 50.0
+time_lim = len(df)
 
 if extreme_initial:
     print("The initial condition is set to extreme.")
 else:
     print("The initial condition is set to standard.")
 
-dt = 0.02
-max_steps = int(time_lim / dt)
+dt = 0.001
+max_steps = int(time_lim)
 
 figheight = 2.5
 figsize_factor = 1.5
@@ -106,7 +111,7 @@ def run_once(observer_list):
     if extreme_initial:
         initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
         initial_condition[0:3,3] += [2,2,2]
-        initial_condition[0:3,4] += [20,20,20]
+        initial_condition[0:3,4] += [1,1,1]
         print("Initial Condition:")
         print(initial_condition)
     
@@ -115,14 +120,42 @@ def run_once(observer_list):
         obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
 
     statesTru = []
-    for step in progressbar(range(max_steps)):
-
-        # Integrate the system and observer
-        U, G, N = velocity_gen(step*dt, X)
-        pos_true = X[0:3,4:5].copy()
-        vel_true = X[0:3,3:4].copy()
-        mag_true = X[0:3,0:3].T @ m0
-
+    #### ROB599 Custom
+    for step in tqdm.tqdm(range(max_steps)):
+        row = df.iloc[step]
+        omega = row[
+            [f"imu_angular_vel_{d}" for d in ["x", "y", "z"]]
+        ].to_numpy()
+        omega_skewed = SO3.skew(omega)
+        imu_accel = (
+            row[[f"imu_linear_acc_{d}" for d in ["x", "y", "z"]]]
+            .to_numpy()
+            .reshape(3, 1)
+        )
+        U = np.block(
+            [
+                [omega_skewed, imu_accel, np.zeros((3, 1))],
+                [np.zeros((2, 5))],
+            ]
+        )
+        g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+        G = np.block(
+            [
+                [np.zeros((3, 3)), g, np.zeros((3, 1))],
+                [np.zeros((2, 5))],
+            ]
+        )
+        N = np.block(
+            [
+                [np.zeros((3, 3)), np.zeros((3, 2))],
+                [np.zeros((1, 3)), 0, -1],
+                [np.zeros((1, 3)), 0, 0],
+            ]
+        )
+        pos_true = X[0:3, 4:5].copy()
+        vel_true = X[0:3, 3:4].copy()
+        mag_true = X[0:3, 0:3].T @ m0
+        #### ROB599 Custom
         X = expm(dt * (G + N)) @ X @ expm(dt * (U - N))
         gyr, acc = SO3.vex(U[0:3,0:3]), U[0:3,3:4]
 
@@ -241,7 +274,6 @@ for i in range(3):
         ax2[0, 2].legend(loc='upper right',ncol=2)
         ax2[i, 1].set_xlabel("Time (s)")
         ax2[i, 2].set_xlabel("Time (s)")
-
 
 
 ax2[0, 0].set_title("Attitude Estimation")
