@@ -151,56 +151,22 @@ def run_once(observer_list):
         obs.obs.set_IC(initial_condition)
         obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
 
-    statesTru = []    
-    #### ROB599 Custom
-    g = 0 * np.reshape([0, 0, 1], (3, 1))
-    G = np.block(
-        [
-            [np.zeros((3, 3)), g, np.zeros((3, 1))],
-            [np.zeros((2, 5))],
-        ]
-    )    
+    statesTru = []  
     for step in tqdm.tqdm(range(0, max_steps,sim_speed_multiplier)):
-        row = df.iloc[step]
-        omega = row[
-            [f"imu_angular_vel_{d}" for d in ["x", "y", "z"]]
-        ].to_numpy().reshape(3, 1)
-        omega_skewed = SO3.skew(omega)
-        imu_accel = (
-            row[[f"imu_linear_acc_{d}" for d in ["x", "y", "z"]]]
-            .to_numpy()
-            .reshape(3, 1)
-        )
-        U = np.block(
-            [
-                [omega_skewed, imu_accel, np.zeros((3, 1))],
-                [np.zeros((2, 5))],
-            ]
-        )
-        N = np.block(
-            [
-                [np.zeros((3, 3)), np.zeros((3, 2))],
-                [np.zeros((1, 3)), 0, -1],
-                [np.zeros((1, 3)), 0, 0],
-            ]
-        )
+        pos_true = X[0:3,4:5].copy()
+        vel_true = X[0:3,3:4].copy()
+        mag_true = X[0:3,0:3].T @ m0
 
-        gps_pos = row[[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)
-        gps_vel = np.zeros((3,1))
-        if step > 0:
-            gps_vel = (gps_pos - df.iloc[step-1][[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)) /(dt / sim_speed_multiplier)
-        mag_true = X[0:3, 0:3].T @ m0
-        #### ROB599 Custom
-        # X = expm(dt * (G + N)) @ X @ expm(dt * (U - N))
-        X = np.eye(5)
-        orient_quat = row[[f"odom_orientation_{d}" for d in ["x", "y", "z", "w"]]]
-        X[:3,:3] = SO3.from_list(orient_quat.tolist(), format_spec='q').as_matrix()
-        X[0:3,3:4] = gps_vel
-        X[0:3,4:5] = gps_pos
-        gyr, acc = SO3.vex(U[0:3,0:3]), U[0:3,3:4]
+        X = get_true_state_from_df(step)
+
+        omega = get_from_df("imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+        imu_angular_vel_skewed = SO3.skew(omega)
+        imu_lin_accel = get_from_df("imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
+        
+        gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
 
         for obs_data in observer_list:
-            obs_data.obs.GPS_update(gps_pos, gps_vel)
+            obs_data.obs.GPS_update(pos_true, vel_true)
             obs_data.obs.compass_update(mag_true, m0)
             obs_data.obs.integrate_dynamics(gyr, acc, dt)
 
