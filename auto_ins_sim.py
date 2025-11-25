@@ -128,7 +128,7 @@ def get_true_state_from_df(step):
     orientation_quat = get_from_df("odom_orientation", Dimensions.quat(), step)
     X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
     X[0:3,3] = get_from_df('odom_twist_linear', Dimensions.vec3(), 0)
-    X[0:3,4] = get_from_df("odom_pose", Dimensions.vec3(), 0).to_numpy().astype(float).reshape(3,1)     
+    X[0:3,4] = get_from_df("odom_pose", Dimensions.vec3(), 0).to_numpy().astype(float).reshape(3)     
     return X
 
 
