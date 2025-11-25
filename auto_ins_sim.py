@@ -21,6 +21,13 @@ np.random.seed(5992)
 import pandas as pd
 import tqdm
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--animate', action='store_true')
+parser.add_argument('--extreme-initial',action='store_true')
+
+args = parser.parse_args()
 
 class Dimensions:
     @staticmethod
@@ -32,11 +39,10 @@ class Dimensions:
 
 df = pd.read_csv('combined_data.csv')
 
-extreme_initial = False
 sim_speed_multiplier : int = 10
 time_lim = len(df)
 
-if extreme_initial:
+if args.extreme_initial:
     print("The initial condition is set to extreme.")
 else:
     print("The initial condition is set to standard.")
@@ -46,8 +52,6 @@ max_steps = int(time_lim)
 
 figheight = 2.5
 figsize_factor = 1.5
-animate = False
-save_animation = False
 
 # Reference magnetic field
 m0 = np.reshape((1.,0.,0.), (3,1))
@@ -136,7 +140,7 @@ def run_once(observer_list):
     X = get_true_state_from_df(0)
     make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
     initial_condition = make_initial_condition(X)
-    if extreme_initial:
+    if args.extreme_initial:
         initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
         initial_condition[0:3,3] += [2,2,0]
         initial_condition[0:3,4] += [1,1,0]
@@ -191,6 +195,7 @@ plt.colorbar(sc, label='time (s)')
 ax.set_xlabel('X')
 ax.set_ylabel('Y')
 ax.set_title('XY Trajectory Colored by Time')
+ax.grid(True)
 ax.axis('equal')
 
 # Plot the error statistics
@@ -340,9 +345,9 @@ ax3[0, 1].set_title("Position Excitation $\mu_p$")
 ax3[0, 1].set_ylabel("x (m)")
 ax3[1, 1].set_ylabel("y (m)")
 ax3[2, 1].set_ylabel("z (m)")
-
+plt.show()
 # Animate trajectories
-if animate:
+if args.animate:
     # from mpl_toolkits.mplot3d import Axes3D
     from matplotlib.animation import FuncAnimation
     from pylie import plotting
@@ -383,13 +388,11 @@ if animate:
     
     ani = FuncAnimation(fig_ani, update_animation, frames=len(poses_tru)+500, interval=20)
     ax.view_init(30, 70)
-    if save_animation:
-        bar = progressbar.ProgressBar(max_value=len(poses_tru)+500)
-        print("Saving animation...")
-        ani.save('INS_animation.mp4', fps=50,progress_callback=lambda i, n: bar.update(i))
+    print("Saving animation...")
+    ani.save('INS_animation.mp4', fps=50)
 
 
-if extreme_initial:
+if args.extreme_initial:
     fig.savefig("INS_observer_error_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
     fig2.savefig("INS_estimation_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
 else:
