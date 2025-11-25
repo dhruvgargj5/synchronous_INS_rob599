@@ -21,6 +21,15 @@ np.random.seed(5992)
 import pandas as pd
 import tqdm
 
+
+class Dimensions:
+    @staticmethod
+    def vec3():
+        return ['x', 'y', 'z']
+    @staticmethod
+    def quat():
+        return ['x', 'y', 'z', 'w']
+
 df = pd.read_csv('combined_data.csv')
 
 extreme_initial = False
@@ -79,35 +88,52 @@ observer_list = [
 ]
 
 
-# circle_frequency = 0.5
-# def velocity_gen(t, X):
-#     omega = np.reshape([0, 0, circle_frequency], (3, 1))
-#     g = 9.81 * np.reshape([0, 0, 1], (3, 1))
-#     a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
+circle_frequency = 0.5
+def velocity_gen(t, X):
+    omega = np.reshape([0, 0, circle_frequency], (3, 1))
+    g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+    a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
 
-#     U = np.block([
-#         [SO3.skew(omega), a, np.zeros((3, 1))],
-#         [np.zeros((2, 5))]
-#     ])
-#     G = np.block([
-#         [np.zeros((3, 3)), g, np.zeros((3, 1))],
-#         [np.zeros((2, 5))]
-#     ])
-#     N = np.block([
-#         [np.zeros((3, 3)), np.zeros((3, 2))],
-#         [np.zeros((1, 3)), 0, -1],
-#         [np.zeros((1, 3)), 0, 0]
-#     ])
+    U = np.block([
+        [SO3.skew(omega), a, np.zeros((3, 1))],
+        [np.zeros((2, 5))]
+    ])
+    G = np.block([
+        [np.zeros((3, 3)), g, np.zeros((3, 1))],
+        [np.zeros((2, 5))]
+    ])
+    N = np.block([
+        [np.zeros((3, 3)), np.zeros((3, 2))],
+        [np.zeros((1, 3)), 0, -1],
+        [np.zeros((1, 3)), 0, 0]
+    ])
 
-#     return U, G, N
+    return U, G, N
+
+def get_from_df(column_prefix, dims, step):
+    # odom
+    #   pose (x,y,z)
+    #   orientation (x,y,z,w)
+    #   twist
+    #       linear velocity (x,y,z)
+    #       angular velocity (x,y,z)
+    # imu
+    #   linear (x,y,z)
+    #   angular (x,y,z)
+    #   orientation (x,y,z,w)
+    return df.iloc[step][[f"{column_prefix}_{d}" for d in dims]]
+
+def get_true_state_from_df(step):
+    X = np.eye(5)
+    orientation_quat = get_from_df("odom_orientation", Dimensions.quat(), step)
+    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
+    X[0:3,3] = get_from_df('odom_twist_linear', Dimensions.vec3(), 0)
+    X[0:3,4] = get_from_df("odom_pose", Dimensions.vec3(), 0).to_numpy().astype(float).reshape(3,1)     
+    return X
 
 
 def run_once(observer_list):
-    X = np.eye(5)
-    orient_quat = df.iloc[0][[f"odom_orientation_{d}" for d in ["x", "y", "z", "w"]]]
-    X[:3,:3] = SO3.from_list(orient_quat.tolist(), format_spec='q').as_matrix()
-    X[0:3,3:4] = 0 # zero vel
-    X[0:3,4:5] = df.iloc[0][[f"odom_pose_{d}" for d in ["x", "y", "z"]]].to_numpy().astype(float).reshape(3,1)
+    X = get_true_state_from_df(0)
     make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
     initial_condition = make_initial_condition(X)
     if extreme_initial:
