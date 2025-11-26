@@ -114,7 +114,7 @@ def velocity_gen(t, X):
 
     return U, G, N
 
-def get_from_df(column_prefix, dims, step):
+def get_from_df(df, column_prefix, dims, step):
     # odom
     #   pose (x,y,z)
     #   orientation (x,y,z,w)
@@ -127,17 +127,18 @@ def get_from_df(column_prefix, dims, step):
     #   orientation (x,y,z,w)
     return df.iloc[step][[f"{column_prefix}_{d}" for d in dims]]
 
-def get_true_state_from_df(step):
+def get_true_state_from_df(df, step):
     X = np.eye(5)
-    orientation_quat = get_from_df("odom_orientation", Dimensions.quat(), step)
+    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
     X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
-    X[0:3,3] = get_from_df('odom_twist_linear', Dimensions.vec3(), 0)
-    X[0:3,4] = get_from_df("odom_pose", Dimensions.vec3(), 0).to_numpy().astype(float).reshape(3)     
+    X[0:3,3] = get_from_df(df, "odom_vel", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
+    X[0:3,4] = get_from_df(df, "odom_pose", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
     return X
 
 
 def run_once(observer_list):
-    X = get_true_state_from_df(0)
+    X = get_true_state_from_df(df,0)
+    X[:3, 3] = np.zeros(3)
     make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
     initial_condition = make_initial_condition(X)
     if args.extreme_initial:
@@ -155,17 +156,17 @@ def run_once(observer_list):
         obs.obs.set_IC(initial_condition)
         obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
 
-    statesTru = []  
-    for step in tqdm.tqdm(range(0, max_steps,sim_speed_multiplier)):
+    statesTru = []
+    for step in tqdm.tqdm(range(max_steps)):
         pos_true = X[0:3,4:5].copy()
         vel_true = X[0:3,3:4].copy()
         mag_true = X[0:3,0:3].T @ m0
 
-        X = get_true_state_from_df(step)
+        X = get_true_state_from_df(df, step)
 
-        omega = get_from_df("imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+        omega = get_from_df(df, "imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
         imu_angular_vel_skewed = SO3.skew(omega)
-        imu_lin_accel = get_from_df("imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
+        imu_lin_accel = get_from_df(df,"imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
         
         gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
 
