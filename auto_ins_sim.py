@@ -26,6 +26,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--animate', action='store_true')
 parser.add_argument('--extreme-initial',action='store_true')
+parser.add_argument('--sim-multiplier', type=int, default=1)
 
 args = parser.parse_args()
 
@@ -37,9 +38,10 @@ class Dimensions:
     def quat():
         return ['x', 'y', 'z', 'w']
 
+sim_speed_multiplier = args.sim_multiplier
+dt = 0.001 * sim_speed_multiplier
 df = pd.read_csv('combined_data.csv')
-
-sim_speed_multiplier : int = 10
+df = df.iloc[::sim_speed_multiplier].reset_index(drop=True)
 time_lim = len(df)
 
 if args.extreme_initial:
@@ -47,7 +49,6 @@ if args.extreme_initial:
 else:
     print("The initial condition is set to standard.")
 
-dt = 0.001 * sim_speed_multiplier
 max_steps = int(time_lim)
 
 figheight = 2.5
@@ -182,12 +183,12 @@ def run_once(observer_list):
         statesTru.append(X.copy())
     return statesTru, observer_list
 
-times = [(dt / sim_speed_multiplier) * step for step in range(0, max_steps,sim_speed_multiplier)]
+times = df['timestamp'].to_numpy()
 statesTru, observer_list = run_once(observer_list)
 
 
-x = df['odom_pose_x'].to_numpy()[::sim_speed_multiplier]
-y = df['odom_pose_y'].to_numpy()[::sim_speed_multiplier]
+x = df['odom_pose_x'].to_numpy()
+y = df['odom_pose_y'].to_numpy()
 
 fig, ax = plt.subplots()
 sc = ax.scatter(x,y,
