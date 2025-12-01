@@ -47,7 +47,7 @@ def get_true_state_from_df(df, step):
 
 def get_noisy_state_from_df(df, step):
     X = np.eye(5)
-    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
+    orientation_quat = get_from_df(df, "odom_orientation_noisy", Dimensions.quat(), step)
     X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
     X[0:3,3] = get_from_df(df, "odom_vel_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
     X[0:3,4] = get_from_df(df, "odom_pose_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
@@ -167,13 +167,10 @@ df = pd.read_csv("combined_data_30Hz.csv")
 df = df.iloc[::sim_speed_multiplier].reset_index(drop=True)
 
 time_lim = len(df)
-
-quat = get_from_df(
-    df, "odom_orientation", ["x", "y", "z", "w"], slice(time_lim)
-)
+quat = get_from_df(df, "odom_orientation", Dimensions.quat(), slice(time_lim))
 robot_2_global = rotations_from_quat(quat.to_numpy())
 vel_robot_frame = get_from_df(
-    df, "cmd_vel_linear", ["x", "y", "z"], slice(time_lim)
+    df, "cmd_vel_linear", Dimensions.vec3(), slice(time_lim)
 ).to_numpy()
 vel_global = np.einsum("bij,bj->bi", robot_2_global, vel_robot_frame)
 df['odom_vel_x'] = vel_global[:, 0]
@@ -193,11 +190,30 @@ def add_noise(data, cov, bias_walk_cov=None):
         out += accumulated_bias
     return out
 
+
+def add_rotation_noise(data, yaw_noise):
+    data_arr = np.asarray(data)
+    N = data.shape[0]
+    noisy_data = []
+    for n in range(N):
+        perfect_rot = SO3.from_list(
+            data_arr[n], format_spec="q"
+        ).as_euler()
+
+        noisy_rot_eul = perfect_rot.copy()
+        noisy_rot_eul[2] += np.random.normal(0, yaw_noise)
+        noisy_rotation_quat = SO3.from_euler(
+            noisy_rot_eul
+        ).as_quaternion()
+        noisy_data.append(noisy_rotation_quat)
+    return np.asarray(noisy_data)
+
 noise_imu_gyr = np.diag([0, 0, 0.005])
 noise_imu_acc = np.diag([0.01, 0.01, 0])
 
 noise_observer_pos = np.diag([0.01, 0.01, 0])
-noise_observer_vel = np.diag([0.05, 0.05, 0])
+noise_observer_vel = np.diag([0.01, 0.01, 0])
+noise_observer_mag = 10
 
 
 if args.noisy_imu:
@@ -233,7 +249,13 @@ if args.noisy_gnss:
     df[["odom_vel_noisy_x", "odom_vel_noisy_y", "odom_vel_noisy_z"]] = (
         add_noise(observer_vel, noise_observer_vel)
     )
-    print(f"Adding noise to GNSS\n pos cov={noise_observer_pos}\n vel cov={noise_observer_vel}")
+
+
+    magn = df[["odom_orientation_x", "odom_orientation_y", "odom_orientation_z", "odom_orientation_w"]]
+    df[["odom_orientation_noisy_x", "odom_orientation_noisy_y", "odom_orientation_noisy_z", "odom_orientation_noisy_w"]] = (
+        add_rotation_noise(magn, noise_observer_mag)
+    )
+    print(f"Adding noise to GNSS\n pos cov={noise_observer_pos}\n vel cov={noise_observer_vel} \n mag cov={noise_observer_mag}")
 
 max_steps = int(time_lim)
 
@@ -269,10 +291,10 @@ print("A_Z(0): diag({},{})".format(A0[0,0], A0[1,1]))
 
 
 observer_list = [
-    # ObserverInfo("Est. p", 'r', 'dotted', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=0.0, gain_A0=A0)),
+    ObserverInfo("Est. p", 'r', 'dotted', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=0.0, gain_A0=A0)),
     # ObserverInfo("MEKF", 'b', 'dashed', MEKF()),
     # ObserverInfo("Est. pv", 'g', 'dashed', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0, gain_A0=A0)),
-    # ObserverInfo("Est. pm", 'm', 'dashdot', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=km, gain_A0=A0)),
+    ObserverInfo("Est. pm", 'm', 'dashdot', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=km, gain_A0=A0)),
     ObserverInfo("Est. pvm", 'b', (5,(10,3)), ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km, gain_A0=A0)),
     # ObserverInfo("Est. v", 'y', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0)),
     # ObserverInfo("Est. vm", 'c', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km)),
@@ -332,15 +354,30 @@ fig.set_figheight(figheight*figsize_factor)
 for obs in observer_list:
     states_est = obs.states_est
     states_aux = obs.states_aux
+    XCopy = [(XTru.copy(), XEst.copy()) for XTru, XEst in zip(statesTru, states_est)]
+    for ii, (xtru, xest) in enumerate(XCopy):
+        def modify_state(state):
+            # Setting roll and pitch to 0 because we are in a flat space
+            xtru_mod  = state.copy()
+            xtru_euler = SO3.from_matrix(state[0:3,0:3]).as_euler()
+            xtru_euler[0:2] = 0
+            xtru_mod[0:3, 0:3] = SO3.from_euler(xtru_euler).as_matrix()
+            # Setting Z velocity, position to 0
+            xtru_mod[2, 3:5] = 0
+            return xtru_mod
+        xtru_mod = modify_state(xtru)
+        xest_mod = modify_state(xest)
+        XCopy[ii] = (xtru_mod, xest_mod)
+        
 
     att_error = np.array([np.linalg.norm(SO3.log(SO3.from_matrix(XTru[0:3,0:3] @ XEst[0:3,0:3].T)))
-                        * 180.0 / np.pi for XTru, XEst in zip(statesTru, states_est)])
+                        * 180.0 / np.pi for XTru, XEst in XCopy])
     ax[0].plot(times, att_error, linestyle=obs.ls, color=obs.lc, label=obs.name)
 
-    vel_error = np.array([np.linalg.norm(XTru[0:3,3:4] - XEst[0:3,3:4]) for XTru, XEst in zip(statesTru, states_est)])
+    vel_error = np.array([np.linalg.norm(XTru[0:3,3:4] - XEst[0:3,3:4]) for XTru, XEst in XCopy])
     ax[1].plot(times, vel_error, linestyle=obs.ls, color=obs.lc, label=obs.name)
 
-    pos_error = np.array([np.linalg.norm(XTru[0:3,4:5] - XEst[0:3,4:5]) for XTru, XEst in zip(statesTru, states_est)])
+    pos_error = np.array([np.linalg.norm(XTru[0:3,4:5] - XEst[0:3,4:5]) for XTru, XEst in XCopy])
     ax[2].plot(times, pos_error, linestyle=obs.ls, color=obs.lc, label=obs.name)
 
 
@@ -356,7 +393,7 @@ for obs in observer_list:
 
 # Format the axes and figure
 
-ax[0].set_ylabel("Attitude\nError (deg)")
+ax[0].set_ylabel("Yaw\nError (deg)")
 ax[1].set_ylabel("Velocity\nError (m/s)")
 ax[2].set_ylabel("Position\nError (m)")
 ax[2].legend(ncol=2)
@@ -435,9 +472,9 @@ ax2[0, 0].set_title("Attitude Estimation")
 ax2[0, 0].set_ylabel("roll (deg)")
 ax2[1, 0].set_ylabel("pitch (deg)")
 ax2[2, 0].set_ylabel("yaw (deg)")
-ax2[0, 0].set_ylim([-180.0, 180.0])
-ax2[1, 0].set_ylim([-180.0/2, 180.0/2])
-ax2[2, 0].set_ylim([-180.0, 180.0])
+# ax2[0, 0].set_ylim([-180.0, 180.0])
+# ax2[1, 0].set_ylim([-180.0/2, 180.0/2])
+# ax2[2, 0].set_ylim([-180.0, 180.0])
 ax2[0, 1].set_title("Velocity Estimation")
 ax2[0, 1].set_ylabel("x (m/s)")
 ax2[1, 1].set_ylabel("y (m/s)")
@@ -482,33 +519,77 @@ ax3[1, 1].set_ylabel("y (m)")
 ax3[2, 1].set_ylabel("z (m)")
 
 # IMU measurements
-fig, axes = plt.subplots(2, 3, figsize=(12, 6), sharex=True)
+fig, axes = plt.subplots(3, 3, figsize=(12, 6), sharex=True)
 
-axes[0, 0].plot(df["imu_angular_vel_x"], label="true", color="C0")
-axes[0, 1].plot(df["imu_angular_vel_y"], color="C1")
-axes[0, 2].plot(df["imu_angular_vel_z"], color="C2")
+axes[0, 0].plot(times, df["imu_angular_vel_x"], label="true", color="C0")
+axes[0, 1].plot(times, df["imu_angular_vel_y"], color="C1")
+axes[0, 2].plot(times, df["imu_angular_vel_z"], color="C2")
 axes[0, 0].plot(
+    times,
     df["imu_angular_vel_noisy_x"],
     label="noisy",
     alpha=0.5,
     color="C0",
 )
-axes[0, 1].plot(df["imu_angular_vel_noisy_y"], alpha=0.5, color="C1")
-axes[0, 2].plot(df["imu_angular_vel_noisy_z"], alpha=0.5, color="C2")
+axes[0, 1].plot(times, df["imu_angular_vel_noisy_y"], alpha=0.5, color="C1")
+axes[0, 2].plot(times, df["imu_angular_vel_noisy_z"], alpha=0.5, color="C2")
 axes[0, 0].legend()
 axes[0, 0].set_title("IMU Angular Velocity (rad/s) X")
 axes[0, 1].set_title("Y")
 axes[0, 2].set_title("Z")
 
-axes[1, 0].plot(df["imu_linear_acc_x"], color="C0")
-axes[1, 1].plot(df["imu_linear_acc_y"], color="C1")
-axes[1, 2].plot(df["imu_linear_acc_z"], color="C2")
-axes[1, 0].plot(df["imu_linear_acc_noisy_x"], alpha=0.5, color="C0")
-axes[1, 1].plot(df["imu_linear_acc_noisy_y"], alpha=0.5, color="C1")
-axes[1, 2].plot(df["imu_linear_acc_noisy_z"], alpha=0.5, color="C2")
+axes[1, 0].plot(times, df["imu_linear_acc_x"], color="C0")
+axes[1, 1].plot(times, df["imu_linear_acc_y"], color="C1")
+axes[1, 2].plot(times, df["imu_linear_acc_z"], color="C2")
+axes[1, 0].plot(times, df["imu_linear_acc_noisy_x"], alpha=0.5, color="C0")
+axes[1, 1].plot(times, df["imu_linear_acc_noisy_y"], alpha=0.5, color="C1")
+axes[1, 2].plot(times, df["imu_linear_acc_noisy_z"], alpha=0.5, color="C2")
 axes[1, 0].set_title("IMU Linear Acceleration (m/s2) X")
 axes[1, 1].set_title("Y")
 axes[1, 2].set_title("Z")
+
+
+orient_quat = df[
+    [
+        "odom_orientation_x",
+        "odom_orientation_y",
+        "odom_orientation_z",
+        "odom_orientation_w",
+    ]
+].to_numpy()
+orient_euler = []
+for o_q in orient_quat:
+    orient_euler.append(
+        SO3.from_list(o_q, format_spec="q").as_euler()
+    )
+orient_euler = np.asarray(orient_euler)
+
+orient_euler_noisy = []
+orient_quat_noisy = df[
+    [
+        "odom_orientation_noisy_x",
+        "odom_orientation_noisy_y",
+        "odom_orientation_noisy_z",
+        "odom_orientation_noisy_w",
+    ]
+].to_numpy()
+for o_q_n in orient_quat_noisy:
+    orient_euler_noisy.append(
+        SO3.from_list(o_q_n, format_spec="q").as_euler()
+    )
+orient_euler_noisy = np.asarray(orient_euler_noisy)
+
+axes[2, 0].plot(times, orient_euler[:, 0], color="C0")
+axes[2, 1].plot(times, orient_euler[:, 1], color="C1")
+axes[2, 2].plot(times, orient_euler[:, 2], color="C2")
+
+axes[2, 0].plot(times, orient_euler_noisy[:, 0], color="C0", alpha=0.5)
+axes[2, 1].plot(times, orient_euler_noisy[:, 1], color="C1", alpha=0.5)
+axes[2, 2].plot(times, orient_euler_noisy[:, 2], color="C2", alpha=0.5)
+
+axes[2, 0].set_title("IMU Magnetometer Roll")
+axes[2, 1].set_title("Pitch")
+axes[2, 2].set_title("Yaw")
 
 fig.suptitle(f"Onboard IMU measurements")
 
