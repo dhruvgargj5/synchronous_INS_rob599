@@ -23,6 +23,44 @@ import tqdm
 
 import argparse
 
+
+def get_from_df(df, column_prefix, dims, step):
+    # odom
+    #   pose (x,y,z)
+    #   orientation (x,y,z,w)
+    #   twist
+    #       linear velocity (x,y,z)
+    #       angular velocity (x,y,z)
+    # imu
+    #   linear (x,y,z)
+    #   angular (x,y,z)
+    #   orientation (x,y,z,w)
+    return df.iloc[step][[f"{column_prefix}_{d}" for d in dims]]
+
+def get_true_state_from_df(df, step):
+    X = np.eye(5)
+    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
+    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
+    X[0:3,3] = get_from_df(df, "odom_vel", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
+    X[0:3,4] = get_from_df(df, "odom_pose", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
+    return X
+
+def rotations_from_quat(quat):
+    rpys = []
+    for q in quat:
+        rpy = SO3.from_list(q, format_spec="q").as_matrix()
+        rpys.append(rpy)
+    return np.asarray(rpys)
+
+def rpy_from_quat(quat):
+    rpys = []
+    for q in quat:
+        rpy = SO3.from_list(q, format_spec="q").as_euler(
+            seq="xyz", degrees=False
+        )
+        rpys.append(rpy)
+    return np.asarray(rpys)
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--animate', action='store_true')
 parser.add_argument('--extreme-initial',action='store_true')
@@ -38,12 +76,91 @@ class Dimensions:
     def quat():
         return ['x', 'y', 'z', 'w']
 
+
+circle_frequency = 0.5
+def velocity_gen(t, X):
+    omega = np.reshape([0, 0, circle_frequency], (3, 1))
+    g = 9.81 * np.reshape([0, 0, 1], (3, 1))
+    a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
+
+    U = np.block([
+        [SO3.skew(omega), a, np.zeros((3, 1))],
+        [np.zeros((2, 5))]
+    ])
+    G = np.block([
+        [np.zeros((3, 3)), g, np.zeros((3, 1))],
+        [np.zeros((2, 5))]
+    ])
+    N = np.block([
+        [np.zeros((3, 3)), np.zeros((3, 2))],
+        [np.zeros((1, 3)), 0, -1],
+        [np.zeros((1, 3)), 0, 0]
+    ])
+
+    return U, G, N
+
+def run_once(df, observer_list):
+    X = get_true_state_from_df(df,0)
+    make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
+    initial_condition = make_initial_condition(X)
+    if args.extreme_initial:
+        initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
+        initial_condition[0:3,3] += [2,2,0]
+        initial_condition[0:3,4] += [1,1,0]
+    print("Initial Condition:")
+    print(f"Rotation mat = {X[:3, :3]}")
+    print(f"Vel  = {X[:3, 3]}")
+    print(f"Pos = {X[:3, 4]}")
+    print(f"Full state: ")
+    print(initial_condition)
+    
+    for obs in observer_list:
+        obs.obs.set_IC(initial_condition)
+        obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
+
+    statesTru = []
+    for step in tqdm.tqdm(range(max_steps)):
+        pos_true = X[0:3,4:5].copy()
+        vel_true = X[0:3,3:4].copy()
+        mag_true = X[0:3,0:3].T @ m0
+
+        X = get_true_state_from_df(df, step)
+
+        omega = get_from_df(df, "imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+        imu_angular_vel_skewed = SO3.skew(omega)
+        imu_lin_accel = get_from_df(df,"imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
+        
+        gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
+
+        for obs_data in observer_list:
+            obs_data.obs.GPS_update(pos_true, vel_true)
+            obs_data.obs.compass_update(mag_true, m0)
+            obs_data.obs.integrate_dynamics(gyr, acc, dt)
+
+            obs_data.states_est.append(obs_data.obs.XHat.copy())
+            obs_data.states_aux.append(obs_data.obs.ZHat.copy())
+
+        # Gather information
+        statesTru.append(X.copy())
+    return statesTru, observer_list
+
 sim_speed_multiplier = args.sim_multiplier
 dt = 0.001 * sim_speed_multiplier
-df = pd.read_csv('combined_data.csv')
+df = pd.read_csv('combined_data_with_velocity.csv')
 df = df.iloc[::sim_speed_multiplier].reset_index(drop=True)
 time_lim = len(df)
 
+quat = get_from_df(
+    df, "odom_orientation", ["x", "y", "z", "w"], slice(time_lim)
+)
+robot_2_global = rotations_from_quat(quat.to_numpy())
+vel_robot_frame = get_from_df(
+    df, "cmd_vel_linear", ["x", "y", "z"], slice(time_lim)
+).to_numpy()
+vel_global = np.einsum("bij,bj->bi", robot_2_global, vel_robot_frame)
+df['odom_vel_x'] = vel_global[:, 0]
+df['odom_vel_y'] = vel_global[:, 1]
+df['odom_vel_z'] = vel_global[:, 2]
 if args.extreme_initial:
     print("The initial condition is set to extreme.")
 else:
@@ -92,99 +209,8 @@ observer_list = [
     # ObserverInfo("Est. vm", 'c', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km)),
 ]
 
-
-circle_frequency = 0.5
-def velocity_gen(t, X):
-    omega = np.reshape([0, 0, circle_frequency], (3, 1))
-    g = 9.81 * np.reshape([0, 0, 1], (3, 1))
-    a =  - (circle_frequency**2)*X[0:3,0:3].T @ X[0:3,4:5] - X[0:3,0:3].T @ g
-
-    U = np.block([
-        [SO3.skew(omega), a, np.zeros((3, 1))],
-        [np.zeros((2, 5))]
-    ])
-    G = np.block([
-        [np.zeros((3, 3)), g, np.zeros((3, 1))],
-        [np.zeros((2, 5))]
-    ])
-    N = np.block([
-        [np.zeros((3, 3)), np.zeros((3, 2))],
-        [np.zeros((1, 3)), 0, -1],
-        [np.zeros((1, 3)), 0, 0]
-    ])
-
-    return U, G, N
-
-def get_from_df(df, column_prefix, dims, step):
-    # odom
-    #   pose (x,y,z)
-    #   orientation (x,y,z,w)
-    #   twist
-    #       linear velocity (x,y,z)
-    #       angular velocity (x,y,z)
-    # imu
-    #   linear (x,y,z)
-    #   angular (x,y,z)
-    #   orientation (x,y,z,w)
-    return df.iloc[step][[f"{column_prefix}_{d}" for d in dims]]
-
-def get_true_state_from_df(df, step):
-    X = np.eye(5)
-    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
-    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
-    X[0:3,3] = get_from_df(df, "odom_vel", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    X[0:3,4] = get_from_df(df, "odom_pose", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    return X
-
-
-def run_once(observer_list):
-    X = get_true_state_from_df(df,0)
-    X[:3, 3] = np.zeros(3)
-    make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
-    initial_condition = make_initial_condition(X)
-    if args.extreme_initial:
-        initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
-        initial_condition[0:3,3] += [2,2,0]
-        initial_condition[0:3,4] += [1,1,0]
-    print("Initial Condition:")
-    print(f"Rotation mat = {X[:3, :3]}")
-    print(f"Vel  = {X[:3, 3]}")
-    print(f"Pos = {X[:3, 4]}")
-    print(f"Full state: ")
-    print(initial_condition)
-    
-    for obs in observer_list:
-        obs.obs.set_IC(initial_condition)
-        obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
-
-    statesTru = []
-    for step in tqdm.tqdm(range(max_steps)):
-        pos_true = X[0:3,4:5].copy()
-        vel_true = X[0:3,3:4].copy()
-        mag_true = X[0:3,0:3].T @ m0
-
-        X = get_true_state_from_df(df, step)
-
-        omega = get_from_df(df, "imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
-        imu_angular_vel_skewed = SO3.skew(omega)
-        imu_lin_accel = get_from_df(df,"imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
-        
-        gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
-
-        for obs_data in observer_list:
-            obs_data.obs.GPS_update(pos_true, vel_true)
-            obs_data.obs.compass_update(mag_true, m0)
-            obs_data.obs.integrate_dynamics(gyr, acc, dt)
-
-            obs_data.states_est.append(obs_data.obs.XHat.copy())
-            obs_data.states_aux.append(obs_data.obs.ZHat.copy())
-
-        # Gather information
-        statesTru.append(X.copy())
-    return statesTru, observer_list
-
 times = df['timestamp'].to_numpy()
-statesTru, observer_list = run_once(observer_list)
+statesTru, observer_list = run_once(df,observer_list)
 
 
 x = df['odom_pose_x'].to_numpy()
@@ -347,7 +373,6 @@ ax3[0, 1].set_title("Position Excitation $\mu_p$")
 ax3[0, 1].set_ylabel("x (m)")
 ax3[1, 1].set_ylabel("y (m)")
 ax3[2, 1].set_ylabel("z (m)")
-plt.show()
 # Animate trajectories
 if args.animate:
     # from mpl_toolkits.mplot3d import Axes3D
@@ -401,5 +426,8 @@ else:
     fig.savefig("INS_observer_error_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
     fig2.savefig("INS_estimation_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
 
+for i in plt.get_fignums():
+    fig = plt.figure(i)
+    fig.savefig(f"figure_{i}.png", dpi=300, bbox_inches='tight')
 
 plt.show()
