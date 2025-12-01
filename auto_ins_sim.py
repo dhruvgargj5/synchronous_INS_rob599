@@ -136,7 +136,7 @@ def run_once(df, observer_list, initial_condition, noisy_imu=False, noisy_gnss=F
             pos_true = X_noisy[0:3,4:5].copy()
             vel_true = X_noisy[0:3,3:4].copy()
             mag_true = X_noisy[0:3,0:3].T @ m0
-            noisyStates.append(X_noisy.copy())            
+            noisyStates.append(X_noisy.copy())
 
         for obs_data in observer_list:
             obs_data.obs.GPS_update(pos_true, vel_true)
@@ -161,9 +161,9 @@ args = parser.parse_args()
 sim_speed_multiplier = args.sim_multiplier
 hz = 30
 dt = float(1 / hz) * sim_speed_multiplier
-dt = 0.001 * sim_speed_multiplier
-df = pd.read_csv('combined_data_with_velocity.csv')
-# df = pd.read_csv("combined_data_30Hz.csv")
+# dt = 0.001 * sim_speed_multiplier
+# df = pd.read_csv('combined_data_with_velocity.csv')
+df = pd.read_csv("combined_data_30Hz.csv")
 df = df.iloc[::sim_speed_multiplier].reset_index(drop=True)
 
 time_lim = len(df)
@@ -195,17 +195,9 @@ def add_noise(data, cov, bias_walk_cov=None):
 
 noise_imu_gyr = np.diag([0, 0, 0.005])
 noise_imu_acc = np.diag([0.01, 0.01, 0])
-noise_imu_gyr_walk_cov = np.diag([0.00001, 0.00001, 0.00001])
-noise_imu_gyr_walk_cov = np.diag([0, 0, 0])
-noise_imu_acc_walk_cov = np.diag([0.00001, 0.00001, 0.00001])
-noise_imu_acc_walk_cov = np.diag([0, 0, 0])
 
 noise_observer_pos = np.diag([0.01, 0.01, 0])
-noise_observer_vel = np.diag([0.01, 0.01, 0])
-noise_observer_pos_walk_cov = np.diag([0.001, 0.001, 0.0])
-# noise_observer_pos_walk_cov = np.diag([0, 0, 0])
-noise_observer_vel_walk_cov = np.diag([0.001, 0.001, 0.0])
-# noise_observer_vel_walk_cov = np.diag([0, 0, 0])
+noise_observer_vel = np.diag([0.05, 0.05, 0])
 
 
 if args.noisy_imu:
@@ -218,7 +210,7 @@ if args.noisy_imu:
             "imu_angular_vel_noisy_y",
             "imu_angular_vel_noisy_z",
         ]
-    ] = add_noise(imu_gyr, noise_imu_gyr, noise_imu_gyr_walk_cov)
+    ] = add_noise(imu_gyr, noise_imu_gyr)
 
     imu_acc = df[
         ["imu_linear_acc_x", "imu_linear_acc_y", "imu_linear_acc_z"]
@@ -229,17 +221,17 @@ if args.noisy_imu:
             "imu_linear_acc_noisy_y",
             "imu_linear_acc_noisy_z",
         ]
-    ] = add_noise(imu_acc, noise_imu_acc, noise_imu_acc_walk_cov)
+    ] = add_noise(imu_acc, noise_imu_acc)
     print(f"Adding noise to IMU\n gyr_cov={noise_imu_gyr}\nacc_cov={noise_imu_acc}")
 if args.noisy_gnss:
     observer_pos = df[["odom_pose_x", "odom_pose_y", "odom_pose_z"]]
     df[
         ["odom_pose_noisy_x", "odom_pose_noisy_y", "odom_pose_noisy_z"]
-    ] = add_noise(observer_pos, noise_observer_pos, noise_observer_pos_walk_cov)
+    ] = add_noise(observer_pos, noise_observer_pos)
 
     observer_vel = df[["odom_vel_x", "odom_vel_y", "odom_vel_z"]]
     df[["odom_vel_noisy_x", "odom_vel_noisy_y", "odom_vel_noisy_z"]] = (
-        add_noise(observer_vel, noise_observer_vel,noise_observer_vel_walk_cov)
+        add_noise(observer_vel, noise_observer_vel)
     )
     print(f"Adding noise to GNSS\n pos cov={noise_observer_pos}\n vel cov={noise_observer_vel}")
 
@@ -277,11 +269,11 @@ print("A_Z(0): diag({},{})".format(A0[0,0], A0[1,1]))
 
 
 observer_list = [
-    ObserverInfo("Est. p", 'r', 'dotted', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=0.0, gain_A0=A0)),
+    # ObserverInfo("Est. p", 'r', 'dotted', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=0.0, gain_A0=A0)),
     # ObserverInfo("MEKF", 'b', 'dashed', MEKF()),
-    ObserverInfo("Est. pv", 'g', 'dashed', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0, gain_A0=A0)),
+    # ObserverInfo("Est. pv", 'g', 'dashed', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0, gain_A0=A0)),
     # ObserverInfo("Est. pm", 'm', 'dashdot', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=km, gain_A0=A0)),
-    # ObserverInfo("Est. pvm", 'b', (5,(10,3)), ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km, gain_A0=A0)),
+    ObserverInfo("Est. pvm", 'b', (5,(10,3)), ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km, gain_A0=A0)),
     # ObserverInfo("Est. v", 'y', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0)),
     # ObserverInfo("Est. vm", 'c', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km)),
 ]
