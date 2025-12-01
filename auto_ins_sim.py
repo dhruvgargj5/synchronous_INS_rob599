@@ -208,11 +208,11 @@ def add_rotation_noise(data, yaw_noise):
         noisy_data.append(noisy_rotation_quat)
     return np.asarray(noisy_data)
 
-noise_imu_gyr = np.diag([0, 0, 0.005])
+noise_imu_gyr = np.diag([0, 0, 0.01])
 noise_imu_acc = np.diag([0.01, 0.01, 0])
 
-noise_observer_pos = np.diag([0.01, 0.01, 0])
-noise_observer_vel = np.diag([0.01, 0.01, 0])
+noise_observer_pos = np.diag([0.05, 0.05, 0])
+noise_observer_vel = np.diag([0.1, 0.1, 0])
 noise_observer_mag = 10
 
 
