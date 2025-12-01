@@ -45,6 +45,14 @@ def get_true_state_from_df(df, step):
     X[0:3,4] = get_from_df(df, "odom_pose", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
     return X
 
+def get_noisy_state_from_df(df, step):
+    X = np.eye(5)
+    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
+    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
+    X[0:3,3] = get_from_df(df, "odom_vel_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
+    X[0:3,4] = get_from_df(df, "odom_pose_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
+    return X
+
 def rotations_from_quat(quat):
     rpys = []
     for q in quat:
@@ -61,12 +69,6 @@ def rpy_from_quat(quat):
         rpys.append(rpy)
     return np.asarray(rpys)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--animate', action='store_true')
-parser.add_argument('--extreme-initial',action='store_true')
-parser.add_argument('--sim-multiplier', type=int, default=1)
-
-args = parser.parse_args()
 
 class Dimensions:
     @staticmethod
@@ -99,18 +101,12 @@ def velocity_gen(t, X):
 
     return U, G, N
 
-def run_once(df, observer_list):
+def run_once(df, observer_list, initial_condition, noisy_imu=False, noisy_gnss=False):
     X = get_true_state_from_df(df,0)
-    make_initial_condition = lambda x: x # X @ SE23.exp(0.02*np.random.randn(9,1)).as_matrix()
-    initial_condition = make_initial_condition(X)
-    if args.extreme_initial:
-        initial_condition = X @ SE23.exp(np.reshape((0.99*np.pi,0,0,0,0,0,0,0,0), (9,1))).as_matrix()
-        initial_condition[0:3,3] += [2,2,0]
-        initial_condition[0:3,4] += [1,1,0]
     print("Initial Condition:")
-    print(f"Rotation mat = {X[:3, :3]}")
-    print(f"Vel  = {X[:3, 3]}")
-    print(f"Pos = {X[:3, 4]}")
+    print(f"Rotation mat = {initial_condition[:3, :3]}")
+    print(f"Vel  = {initial_condition[:3, 3]}")
+    print(f"Pos = {initial_condition[:3, 4]}")
     print(f"Full state: ")
     print(initial_condition)
     
@@ -119,18 +115,28 @@ def run_once(df, observer_list):
         obs.obs.ZHat[0:3,3:5] = initial_condition[0:3,3:5] @ obs.obs.ZHat[3:5,3:5]
 
     statesTru = []
+    noisyStates = []
     for step in tqdm.tqdm(range(max_steps)):
+        if noisy_imu:
+            omega = get_from_df(df, "imu_angular_vel_noisy",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+            imu_angular_vel_skewed = SO3.skew(omega)
+            imu_lin_accel = get_from_df(df,"imu_linear_acc_noisy",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+        else:
+            omega = get_from_df(df, "imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
+            imu_angular_vel_skewed = SO3.skew(omega)
+            imu_lin_accel = get_from_df(df,"imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)            
+        
+        gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
+        X = get_true_state_from_df(df, step)
         pos_true = X[0:3,4:5].copy()
         vel_true = X[0:3,3:4].copy()
         mag_true = X[0:3,0:3].T @ m0
-
-        X = get_true_state_from_df(df, step)
-
-        omega = get_from_df(df, "imu_angular_vel",Dimensions.vec3(), step).to_numpy().reshape(3, 1)
-        imu_angular_vel_skewed = SO3.skew(omega)
-        imu_lin_accel = get_from_df(df,"imu_linear_acc",Dimensions.vec3(), step).to_numpy().reshape(3, 1)        
-        
-        gyr, acc = SO3.vex(imu_angular_vel_skewed), imu_lin_accel
+        if noisy_gnss:
+            X_noisy = get_noisy_state_from_df(df, step)
+            pos_true = X_noisy[0:3,4:5].copy()
+            vel_true = X_noisy[0:3,3:4].copy()
+            mag_true = X_noisy[0:3,0:3].T @ m0
+            noisyStates.append(X_noisy.copy())            
 
         for obs_data in observer_list:
             obs_data.obs.GPS_update(pos_true, vel_true)
@@ -142,12 +148,24 @@ def run_once(df, observer_list):
 
         # Gather information
         statesTru.append(X.copy())
-    return statesTru, observer_list
+    return statesTru, noisyStates, observer_list
+parser = argparse.ArgumentParser()
+parser.add_argument('--animate', action='store_true')
+parser.add_argument('--extreme-initial',action='store_true')
+parser.add_argument('--noisy-imu',action='store_true')
+parser.add_argument('--noisy-gnss',action='store_true')
+parser.add_argument('--sim-multiplier', type=int, default=1)
+
+args = parser.parse_args()
 
 sim_speed_multiplier = args.sim_multiplier
+hz = 30
+dt = float(1 / hz) * sim_speed_multiplier
 dt = 0.001 * sim_speed_multiplier
 df = pd.read_csv('combined_data_with_velocity.csv')
+# df = pd.read_csv("combined_data_30Hz.csv")
 df = df.iloc[::sim_speed_multiplier].reset_index(drop=True)
+
 time_lim = len(df)
 
 quat = get_from_df(
@@ -161,10 +179,69 @@ vel_global = np.einsum("bij,bj->bi", robot_2_global, vel_robot_frame)
 df['odom_vel_x'] = vel_global[:, 0]
 df['odom_vel_y'] = vel_global[:, 1]
 df['odom_vel_z'] = vel_global[:, 2]
-if args.extreme_initial:
-    print("The initial condition is set to extreme.")
-else:
-    print("The initial condition is set to standard.")
+
+
+def add_noise(data, cov, bias_walk_cov=None):
+    N = data.shape[0]
+    noise = np.random.multivariate_normal(np.zeros(3), cov, N)
+    out = data + noise
+    if bias_walk_cov is not None:
+        bias = np.random.multivariate_normal(
+            np.zeros(3), bias_walk_cov, size=N
+        )
+        accumulated_bias = np.cumsum(bias, axis=0)
+        out += accumulated_bias
+    return out
+
+noise_imu_gyr = np.diag([0, 0, 0.005])
+noise_imu_acc = np.diag([0.01, 0.01, 0])
+noise_imu_gyr_walk_cov = np.diag([0.00001, 0.00001, 0.00001])
+noise_imu_gyr_walk_cov = np.diag([0, 0, 0])
+noise_imu_acc_walk_cov = np.diag([0.00001, 0.00001, 0.00001])
+noise_imu_acc_walk_cov = np.diag([0, 0, 0])
+
+noise_observer_pos = np.diag([0.01, 0.01, 0])
+noise_observer_vel = np.diag([0.01, 0.01, 0])
+noise_observer_pos_walk_cov = np.diag([0.001, 0.001, 0.0])
+# noise_observer_pos_walk_cov = np.diag([0, 0, 0])
+noise_observer_vel_walk_cov = np.diag([0.001, 0.001, 0.0])
+# noise_observer_vel_walk_cov = np.diag([0, 0, 0])
+
+
+if args.noisy_imu:
+    imu_gyr = df[
+        ["imu_angular_vel_x", "imu_angular_vel_y", "imu_angular_vel_z"]
+    ]
+    df[
+        [
+            "imu_angular_vel_noisy_x",
+            "imu_angular_vel_noisy_y",
+            "imu_angular_vel_noisy_z",
+        ]
+    ] = add_noise(imu_gyr, noise_imu_gyr, noise_imu_gyr_walk_cov)
+
+    imu_acc = df[
+        ["imu_linear_acc_x", "imu_linear_acc_y", "imu_linear_acc_z"]
+    ]
+    df[
+        [
+            "imu_linear_acc_noisy_x",
+            "imu_linear_acc_noisy_y",
+            "imu_linear_acc_noisy_z",
+        ]
+    ] = add_noise(imu_acc, noise_imu_acc, noise_imu_acc_walk_cov)
+    print(f"Adding noise to IMU\n gyr_cov={noise_imu_gyr}\nacc_cov={noise_imu_acc}")
+if args.noisy_gnss:
+    observer_pos = df[["odom_pose_x", "odom_pose_y", "odom_pose_z"]]
+    df[
+        ["odom_pose_noisy_x", "odom_pose_noisy_y", "odom_pose_noisy_z"]
+    ] = add_noise(observer_pos, noise_observer_pos, noise_observer_pos_walk_cov)
+
+    observer_vel = df[["odom_vel_x", "odom_vel_y", "odom_vel_z"]]
+    df[["odom_vel_noisy_x", "odom_vel_noisy_y", "odom_vel_noisy_z"]] = (
+        add_noise(observer_vel, noise_observer_vel,noise_observer_vel_walk_cov)
+    )
+    print(f"Adding noise to GNSS\n pos cov={noise_observer_pos}\n vel cov={noise_observer_vel}")
 
 max_steps = int(time_lim)
 
@@ -203,28 +280,58 @@ observer_list = [
     ObserverInfo("Est. p", 'r', 'dotted', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=0.0, gain_A0=A0)),
     # ObserverInfo("MEKF", 'b', 'dashed', MEKF()),
     ObserverInfo("Est. pv", 'g', 'dashed', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0, gain_A0=A0)),
-    ObserverInfo("Est. pm", 'm', 'dashdot', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=km, gain_A0=A0)),
-    ObserverInfo("Est. pvm", 'b', (5,(10,3)), ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km, gain_A0=A0)),
+    # ObserverInfo("Est. pm", 'm', 'dashdot', ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=0.0, gain_kd=0.0, gain_km=km, gain_A0=A0)),
+    # ObserverInfo("Est. pvm", 'b', (5,(10,3)), ComplementaryINS(gain_kp=kp, gain_kc=kc, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km, gain_A0=A0)),
     # ObserverInfo("Est. v", 'y', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=0.0)),
     # ObserverInfo("Est. vm", 'c', ':', ComplementaryINS(gain_kp=0.0, gain_kc=0.0, gain_Kq = Kq, gain_kv=kv, gain_kd=kd, gain_km=km)),
 ]
 
 times = df['timestamp'].to_numpy()
-statesTru, observer_list = run_once(df,observer_list)
-
-
-x = df['odom_pose_x'].to_numpy()
-y = df['odom_pose_y'].to_numpy()
+initial_condition = get_true_state_from_df(df,0)
+if args.extreme_initial:
+    initial_condition = initial_condition @ SE23.exp(np.reshape((0,0,0.99*np.pi,0,0,0,0,0,0), (9,1))).as_matrix()
+    print("The initial condition is set to extreme.")
+else:
+    print("The initial condition is set to standard.")
+statesTru, noisyStates, observer_list = run_once(df,observer_list, initial_condition, args.noisy_imu, args.noisy_gnss)
 
 fig, ax = plt.subplots()
-sc = ax.scatter(x,y,
-                c=times, s=5)
-plt.colorbar(sc, label='time (s)')
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_title('XY Trajectory Colored by Time')
+
+noisy_x = df["odom_pose_noisy_x"].to_numpy()
+noisy_y = df["odom_pose_noisy_y"].to_numpy()
+ax.scatter(
+    noisy_x,
+    noisy_y,
+    c=list(range(time_lim)),
+    s=3,
+    label="noisy",
+    cmap="Reds",
+    alpha=0.5,
+)
+
+x = df["odom_pose_x"].to_numpy()
+y = df["odom_pose_y"].to_numpy()
+ax.scatter(x[0], y[0], label="start", marker="D", color="k")
+ax.scatter(x[-1], y[-1], label="end", marker="*", color="k")
+ax.plot(
+    x,
+    y,
+    linewidth=2,
+    label="ground truth",
+    color='k'
+)
+
+for obs in observer_list:
+    vel_est = np.hstack([XEst[0:3,3:4] for XEst in obs.states_est])
+    pos_est = np.hstack([XEst[0:3,4:5] for XEst in obs.states_est])
+    ax.plot(pos_est[0,:], pos_est[1, :], label=obs.name, color=obs.lc)
+
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+ax.set_title("Ground Truth vs Noisy Trajectory")
+ax.legend()
 ax.grid(True)
-ax.axis('equal')
+ax.axis("equal")
 
 # Plot the error statistics
 fig, ax = plt.subplots(4, 1, layout='constrained')
@@ -292,6 +399,10 @@ fig2.set_figheight(3/4*figheight*figsize_factor)
 eul_tru = np.vstack([SO3.from_matrix(XTru[0:3,0:3]).as_euler() for XTru in statesTru]).T
 vel_tru = np.hstack([XTru[0:3,3:4] for XTru in statesTru])
 pos_tru = np.hstack([XTru[0:3,4:5] for XTru in statesTru])
+
+eul_noisy = np.vstack([SO3.from_matrix(XNoisy[0:3,0:3]).as_euler() for XNoisy in noisyStates]).T
+vel_noisy = np.hstack([XNoisy[0:3,3:4] for XNoisy in noisyStates])
+pos_noisy = np.hstack([XNoisy[0:3,4:5] for XNoisy in noisyStates])
 for i in range(3):
     for obs in observer_list:
         eul_est = np.vstack([SO3.from_matrix(XEst[0:3,0:3]).as_euler() for XEst in obs.states_est]).T
@@ -301,7 +412,11 @@ for i in range(3):
         ax2[i, 0].plot(times, eul_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
         ax2[i, 1].plot(times, vel_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
         ax2[i, 2].plot(times, pos_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
-        
+
+    ax2[i, 0].plot(times, eul_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+    ax2[i, 1].plot(times, vel_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+    ax2[i, 2].plot(times, pos_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+    
     ax2[i, 0].plot(times, eul_tru[i, :], 'k', label='True')
     ax2[i, 1].plot(times, vel_tru[i, :], 'k', label='True')
     ax2[i, 2].plot(times, pos_tru[i, :], 'k', label='True')
@@ -373,6 +488,65 @@ ax3[0, 1].set_title("Position Excitation $\mu_p$")
 ax3[0, 1].set_ylabel("x (m)")
 ax3[1, 1].set_ylabel("y (m)")
 ax3[2, 1].set_ylabel("z (m)")
+
+# IMU measurements
+fig, axes = plt.subplots(2, 3, figsize=(12, 6), sharex=True)
+
+axes[0, 0].plot(df["imu_angular_vel_x"], label="true", color="C0")
+axes[0, 1].plot(df["imu_angular_vel_y"], color="C1")
+axes[0, 2].plot(df["imu_angular_vel_z"], color="C2")
+axes[0, 0].plot(
+    df["imu_angular_vel_noisy_x"],
+    label="noisy",
+    alpha=0.5,
+    color="C0",
+)
+axes[0, 1].plot(df["imu_angular_vel_noisy_y"], alpha=0.5, color="C1")
+axes[0, 2].plot(df["imu_angular_vel_noisy_z"], alpha=0.5, color="C2")
+axes[0, 0].legend()
+axes[0, 0].set_title("IMU Angular Velocity (rad/s) X")
+axes[0, 1].set_title("Y")
+axes[0, 2].set_title("Z")
+
+axes[1, 0].plot(df["imu_linear_acc_x"], color="C0")
+axes[1, 1].plot(df["imu_linear_acc_y"], color="C1")
+axes[1, 2].plot(df["imu_linear_acc_z"], color="C2")
+axes[1, 0].plot(df["imu_linear_acc_noisy_x"], alpha=0.5, color="C0")
+axes[1, 1].plot(df["imu_linear_acc_noisy_y"], alpha=0.5, color="C1")
+axes[1, 2].plot(df["imu_linear_acc_noisy_z"], alpha=0.5, color="C2")
+axes[1, 0].set_title("IMU Linear Acceleration (m/s2) X")
+axes[1, 1].set_title("Y")
+axes[1, 2].set_title("Z")
+
+fig.suptitle(f"Onboard IMU measurements")
+
+
+# GNSS measurements
+fig, axes = plt.subplots(2, 3, figsize=(12, 6), sharex=True)
+
+axes[0, 0].plot(df["odom_pose_x"], color="C0")
+axes[0, 1].plot(df["odom_pose_y"], color="C1")
+axes[0, 2].plot(df["odom_pose_z"], color="C2")
+axes[0, 0].plot(df["odom_pose_noisy_x"], alpha=0.5, color="C0")
+axes[0, 1].plot(df["odom_pose_noisy_y"], alpha=0.5, color="C1")
+axes[0, 2].plot(df["odom_pose_noisy_z"], alpha=0.5, color="C2")
+axes[0, 0].set_title("Position over time (m) X")
+axes[0, 1].set_title("Y")
+axes[0, 2].set_title("Z")
+
+axes[1, 0].plot(df["odom_vel_x"])
+axes[1, 1].plot(df["odom_vel_y"])
+axes[1, 2].plot(df["odom_vel_z"])
+axes[1, 0].plot(df["odom_vel_noisy_x"], alpha=0.5, color="C0")
+axes[1, 1].plot(df["odom_vel_noisy_y"], alpha=0.5, color="C1")
+axes[1, 2].plot(df["odom_vel_noisy_z"], alpha=0.5, color="C2")
+axes[1, 0].set_title("Odom vel over time (m/s) X")
+axes[1, 1].set_title("Y")
+axes[1, 2].set_title("Z")
+
+fig.suptitle(f"External Observer Measurments (GNSS)")
+
+
 # Animate trajectories
 if args.animate:
     # from mpl_toolkits.mplot3d import Axes3D
