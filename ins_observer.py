@@ -1,6 +1,8 @@
 from pylie import SO3
 import numpy as np
 from scipy.linalg import expm
+from dataclasses import dataclass, field
+
 
 gravity_vector = 9.81 * np.reshape([0, 0, 1], (3, 1))
 G_matrix = np.block([
@@ -193,3 +195,13 @@ class SimpleComplementaryINS:
         if euler_angles[2] < 0.0:
             euler_angles[2] += 360.0
         return euler_angles, self.vHat.copy().ravel(), self.pHat.copy().ravel()
+    
+
+@dataclass
+class ObserverInfo:
+    name : str
+    lc : str
+    ls : str
+    obs : ComplementaryINS
+    states_est : list = field(default_factory=list)
+    states_aux : list = field(default_factory=list)

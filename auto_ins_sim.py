@@ -10,7 +10,7 @@ try:
 except ImportError:
     progressbar = lambda x : x
 
-from ins_observer import ComplementaryINS
+from ins_observer import ComplementaryINS, ObserverInfo
 
 plt.rc('lines', linewidth=1.0)
 plt.rc('text', usetex=True)
@@ -23,60 +23,7 @@ import tqdm
 
 import argparse
 
-
-def get_from_df(df, column_prefix, dims, step):
-    # odom
-    #   pose (x,y,z)
-    #   orientation (x,y,z,w)
-    #   twist
-    #       linear velocity (x,y,z)
-    #       angular velocity (x,y,z)
-    # imu
-    #   linear (x,y,z)
-    #   angular (x,y,z)
-    #   orientation (x,y,z,w)
-    return df.iloc[step][[f"{column_prefix}_{d}" for d in dims]]
-
-def get_true_state_from_df(df, step):
-    X = np.eye(5)
-    orientation_quat = get_from_df(df, "odom_orientation", Dimensions.quat(), step)
-    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
-    X[0:3,3] = get_from_df(df, "odom_vel", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    X[0:3,4] = get_from_df(df, "odom_pose", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    return X
-
-def get_noisy_state_from_df(df, step):
-    X = np.eye(5)
-    orientation_quat = get_from_df(df, "odom_orientation_noisy", Dimensions.quat(), step)
-    X[:3,:3] = SO3.from_list(orientation_quat.tolist(), format_spec='q').as_matrix()
-    X[0:3,3] = get_from_df(df, "odom_vel_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    X[0:3,4] = get_from_df(df, "odom_pose_noisy", Dimensions.vec3(), step).to_numpy().astype(float).reshape(3)
-    return X
-
-def rotations_from_quat(quat):
-    rpys = []
-    for q in quat:
-        rpy = SO3.from_list(q, format_spec="q").as_matrix()
-        rpys.append(rpy)
-    return np.asarray(rpys)
-
-def rpy_from_quat(quat):
-    rpys = []
-    for q in quat:
-        rpy = SO3.from_list(q, format_spec="q").as_euler(
-            seq="xyz", degrees=False
-        )
-        rpys.append(rpy)
-    return np.asarray(rpys)
-
-
-class Dimensions:
-    @staticmethod
-    def vec3():
-        return ['x', 'y', 'z']
-    @staticmethod
-    def quat():
-        return ['x', 'y', 'z', 'w']
+from utils import get_from_df, get_noisy_state_from_df, get_true_state_from_df, Dimensions, rotations_from_quat, rpy_from_quat
 
 
 circle_frequency = 0.5
@@ -155,6 +102,9 @@ parser.add_argument('--extreme-initial',action='store_true')
 parser.add_argument('--noisy-imu',action='store_true')
 parser.add_argument('--noisy-gnss',action='store_true')
 parser.add_argument('--sim-multiplier', type=int, default=1)
+parser.add_argument('--save-noisy', action='store_true')
+parser.add_argument('--save-observers', action='store_true')
+parser.add_argument('--save-figs', action='store_true')
 
 args = parser.parse_args()
 
@@ -213,7 +163,7 @@ noise_imu_acc = np.diag([0.01, 0.01, 0])
 
 noise_observer_pos = np.diag([0.05, 0.05, 0])
 noise_observer_vel = np.diag([0.1, 0.1, 0])
-noise_observer_mag = 10
+noise_observer_mag = 5 # degrees
 
 
 if args.noisy_imu:
@@ -257,6 +207,9 @@ if args.noisy_gnss:
     )
     print(f"Adding noise to GNSS\n pos cov={noise_observer_pos}\n vel cov={noise_observer_vel} \n mag cov={noise_observer_mag}")
 
+if args.save_noisy:
+    df.to_csv(f"combined_data_30Hz_noisy.csv")
+
 max_steps = int(time_lim)
 
 figheight = 2.5
@@ -266,14 +219,7 @@ figsize_factor = 1.5
 m0 = np.reshape((1.,0.,0.), (3,1))
 
 # Set up observers
-@dataclass
-class ObserverInfo:
-    name : str
-    lc : str
-    ls : str
-    obs : ComplementaryINS
-    states_est : list = field(default_factory=list)
-    states_aux : list = field(default_factory=list)
+
 
 # Standard gains
 kp = 2.0
@@ -303,17 +249,27 @@ observer_list = [
 times = df['timestamp'].to_numpy()
 initial_condition = get_true_state_from_df(df,0)
 if args.extreme_initial:
-    initial_condition = initial_condition @ SE23.exp(np.reshape((0,0,0.99*np.pi,0,0,0,0,0,0), (9,1))).as_matrix()
+    initial_condition = initial_condition @ SE23.exp(np.reshape((0,0,0.5*np.pi,0,0,0,0,0,0), (9,1))).as_matrix()
     print("The initial condition is set to extreme.")
 else:
     print("The initial condition is set to standard.")
 statesTru, noisyStates, observer_list = run_once(df,observer_list, initial_condition, args.noisy_imu, args.noisy_gnss)
 
+if args.save_observers:
+    import pickle
+    with open("observers.pickle", 'wb') as f:
+        pickle.dump(observer_list, f)
+
 fig, ax = plt.subplots()
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+ax.set_title("Ground Truth vs Noisy Trajectory")
+ax.grid(True)
+ax.axis("equal")
 
 noisy_x = df["odom_pose_noisy_x"].to_numpy()
 noisy_y = df["odom_pose_noisy_y"].to_numpy()
-ax.scatter(
+noisy_sc = ax.scatter(
     noisy_x,
     noisy_y,
     c=list(range(time_lim)),
@@ -334,18 +290,16 @@ ax.plot(
     label="ground truth",
     color='k'
 )
-
-for obs in observer_list:
+ax.legend()
+fig.savefig(f'figs/true_noisy_trajectory.png')
+noisy_sc.remove()
+for ii, obs in enumerate(observer_list):
     vel_est = np.hstack([XEst[0:3,3:4] for XEst in obs.states_est])
     pos_est = np.hstack([XEst[0:3,4:5] for XEst in obs.states_est])
-    ax.plot(pos_est[0,:], pos_est[1, :], label=obs.name, color=obs.lc)
+    lines = ax.plot(pos_est[0,:], pos_est[1, :], label=obs.name, color=obs.lc)
+    ax.legend()
+    fig.savefig(f'figs/{obs.name.replace(' ', '_')}.png')
 
-ax.set_xlabel("X")
-ax.set_ylabel("Y")
-ax.set_title("Ground Truth vs Noisy Trajectory")
-ax.legend()
-ax.grid(True)
-ax.axis("equal")
 
 # Plot the error statistics
 fig, ax = plt.subplots(4, 1, layout='constrained')
@@ -375,6 +329,7 @@ for obs in observer_list:
     ax[0].plot(times, att_error, linestyle=obs.ls, color=obs.lc, label=obs.name)
 
     vel_error = np.array([np.linalg.norm(XTru[0:3,3:4] - XEst[0:3,3:4]) for XTru, XEst in XCopy])
+    print(f"{np.mean(vel_error)=}")
     ax[1].plot(times, vel_error, linestyle=obs.ls, color=obs.lc, label=obs.name)
 
     pos_error = np.array([np.linalg.norm(XTru[0:3,4:5] - XEst[0:3,4:5]) for XTru, XEst in XCopy])
@@ -418,12 +373,16 @@ ax[-1].set_xlabel("Time (s)")
 
 fig.suptitle("Observer Error Metrics")
 
+import matplotlib.gridspec as gridspec
 
 # Plot the estimation over time
 
-fig2, ax2 = plt.subplots(3, 3, layout='constrained')
-fig2.set_figwidth(7.16*figsize_factor)
-fig2.set_figheight(3/4*figheight*figsize_factor)
+fig2 = plt.figure(figsize=(12,8))
+gs = gridspec.GridSpec(4, 4, figure=fig)  # 3x3 grid
+
+# fig2, ax2 = plt.subplots(3, 3, layout='constrained')
+# fig2.set_figwidth(7.16*figsize_factor)
+# fig2.set_figheight(3/4*figheight*figsize_factor)
 
 eul_tru = np.vstack([SO3.from_matrix(XTru[0:3,0:3]).as_euler() for XTru in statesTru]).T
 vel_tru = np.hstack([XTru[0:3,3:4] for XTru in statesTru])
@@ -432,57 +391,101 @@ pos_tru = np.hstack([XTru[0:3,4:5] for XTru in statesTru])
 eul_noisy = np.vstack([SO3.from_matrix(XNoisy[0:3,0:3]).as_euler() for XNoisy in noisyStates]).T
 vel_noisy = np.hstack([XNoisy[0:3,3:4] for XNoisy in noisyStates])
 pos_noisy = np.hstack([XNoisy[0:3,4:5] for XNoisy in noisyStates])
-for i in range(3):
-    for obs in observer_list:
-        eul_est = np.vstack([SO3.from_matrix(XEst[0:3,0:3]).as_euler() for XEst in obs.states_est]).T
-        vel_est = np.hstack([XEst[0:3,3:4] for XEst in obs.states_est])
-        pos_est = np.hstack([XEst[0:3,4:5] for XEst in obs.states_est])
 
-        ax2[i, 0].plot(times, eul_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
-        ax2[i, 1].plot(times, vel_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
-        ax2[i, 2].plot(times, pos_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
+posx_ax = fig2.add_subplot(gs[0, 0:2])
+posy_ax = fig2.add_subplot(gs[1, 0:2])
 
-    ax2[i, 0].plot(times, eul_noisy[i, :], alpha=0.5,color='grey', label='noisy')
-    ax2[i, 1].plot(times, vel_noisy[i, :], alpha=0.5,color='grey', label='noisy')
-    ax2[i, 2].plot(times, pos_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+posx_ax.set(xlabel='time', title='Position X (m)')
+posy_ax.set(xlabel='time', title='Position Y (m)')
+
+velx_ax = fig2.add_subplot(gs[0, 2:])
+vely_ax = fig2.add_subplot(gs[1, 2:])
+velx_ax.set(xlabel='time', title='Velocity X (m/s)')
+vely_ax.set(xlabel='time', title='Velocity Y (m/s)')
+
+yaw_ax = fig2.add_subplot(gs[2:, :])
+yaw_ax.set(xlabel='time', title='Yaw (deg)')
+
+for obs in observer_list:
+    eul_est = np.vstack([SO3.from_matrix(XEst[0:3,0:3]).as_euler() for XEst in obs.states_est]).T
+    vel_est = np.hstack([XEst[0:3,3:4] for XEst in obs.states_est])
+    pos_est = np.hstack([XEst[0:3,4:5] for XEst in obs.states_est])
     
-    ax2[i, 0].plot(times, eul_tru[i, :], 'k', label='True')
-    ax2[i, 1].plot(times, vel_tru[i, :], 'k', label='True')
-    ax2[i, 2].plot(times, pos_tru[i, :], 'k', label='True')
+    posx_ax.plot(times, pos_est[0, :],  linestyle=obs.ls, color=obs.lc, label=obs.name)
+    posy_ax.plot(times, pos_est[1, :],  linestyle=obs.ls, color=obs.lc, label=obs.name)
+    posx_ax.plot(times, pos_noisy[0, :],  alpha=0.5,color='grey', label='noisy')
+    posy_ax.plot(times, pos_noisy[1, :],  alpha=0.5,color='grey', label='noisy')
+    posx_ax.plot(times, pos_tru[0, :],   'k', label='True')
+    posy_ax.plot(times, pos_tru[1, :],   'k', label='True')
 
-    ax2[i, 0].set_xlim([times[0], times[-1]])
-    ax2[i, 1].set_xlim([times[0], times[-1]])
-    ax2[i, 2].set_xlim([times[0], times[-1]])
-    ax2[i, 0].grid()
-    ax2[i, 1].grid()
-    ax2[i, 2].grid()
+    velx_ax.plot(times, vel_est[0, :],  linestyle=obs.ls, color=obs.lc, label=obs.name)
+    vely_ax.plot(times, vel_est[1, :],  linestyle=obs.ls, color=obs.lc, label=obs.name)
+    velx_ax.plot(times, vel_noisy[0, :],  alpha=0.5,color='grey', label='noisy')
+    vely_ax.plot(times, vel_noisy[1, :],  alpha=0.5,color='grey', label='noisy')
+    velx_ax.plot(times, vel_tru[0, :],   'k', label='True')
+    vely_ax.plot(times, vel_tru[1, :],   'k', label='True')    
 
-    if i < 2:
-        ax2[i, 0].set_xticklabels([])
-        ax2[i, 1].set_xticklabels([])
-        ax2[i, 2].set_xticklabels([])
-    else:
-        ax2[i, 0].set_xlabel("Time (s)")
-        ax2[0, 2].legend(loc='upper right',ncol=2)
-        ax2[i, 1].set_xlabel("Time (s)")
-        ax2[i, 2].set_xlabel("Time (s)")
+    yaw_ax.plot(times, eul_est[2, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
+    yaw_ax.plot(times, eul_noisy[2, :],  alpha=0.5,color='grey', label='noisy')
+    yaw_ax.plot(times, eul_tru[2, :], 'k', label='True')
+
+est_axes = [posx_ax, posy_ax, velx_ax, vely_ax, yaw_ax]
+for ii, ax in enumerate(est_axes):
+    if ii == 4:
+        ax.legend(ncol=2)
+    ax.grid(True)
+
+# for i in range(3):
+#     for obs in observer_list:
+#         eul_est = np.vstack([SO3.from_matrix(XEst[0:3,0:3]).as_euler() for XEst in obs.states_est]).T
+#         vel_est = np.hstack([XEst[0:3,3:4] for XEst in obs.states_est])
+#         pos_est = np.hstack([XEst[0:3,4:5] for XEst in obs.states_est])
+
+#         ax2[i, 0].plot(times, eul_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
+#         ax2[i, 1].plot(times, vel_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
+#         ax2[i, 2].plot(times, pos_est[i, :], linestyle=obs.ls, color=obs.lc, label=obs.name)
+
+#     ax2[i, 0].plot(times, eul_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+#     ax2[i, 1].plot(times, vel_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+#     ax2[i, 2].plot(times, pos_noisy[i, :], alpha=0.5,color='grey', label='noisy')
+    
+#     ax2[i, 0].plot(times, eul_tru[i, :], 'k', label='True')
+#     ax2[i, 1].plot(times, vel_tru[i, :], 'k', label='True')
+#     ax2[i, 2].plot(times, pos_tru[i, :], 'k', label='True')
+
+#     ax2[i, 0].set_xlim([times[0], times[-1]])
+#     ax2[i, 1].set_xlim([times[0], times[-1]])
+#     ax2[i, 2].set_xlim([times[0], times[-1]])
+#     ax2[i, 0].grid()
+#     ax2[i, 1].grid()
+#     ax2[i, 2].grid()
+
+#     if i < 2:
+#         ax2[i, 0].set_xticklabels([])
+#         ax2[i, 1].set_xticklabels([])
+#         ax2[i, 2].set_xticklabels([])
+#     else:
+#         ax2[i, 0].set_xlabel("Time (s)")
+#         ax2[0, 2].legend(loc='upper right',ncol=2)
+#         ax2[i, 1].set_xlabel("Time (s)")
+#         ax2[i, 2].set_xlabel("Time (s)")
 
 
-ax2[0, 0].set_title("Attitude Estimation")
-ax2[0, 0].set_ylabel("roll (deg)")
-ax2[1, 0].set_ylabel("pitch (deg)")
-ax2[2, 0].set_ylabel("yaw (deg)")
-# ax2[0, 0].set_ylim([-180.0, 180.0])
-# ax2[1, 0].set_ylim([-180.0/2, 180.0/2])
-# ax2[2, 0].set_ylim([-180.0, 180.0])
-ax2[0, 1].set_title("Velocity Estimation")
-ax2[0, 1].set_ylabel("x (m/s)")
-ax2[1, 1].set_ylabel("y (m/s)")
-ax2[2, 1].set_ylabel("z (m/s)")
-ax2[0, 2].set_title("Position Estimation")
-ax2[0, 2].set_ylabel("x (m)")
-ax2[1, 2].set_ylabel("y (m)")
-ax2[2, 2].set_ylabel("z (m)")
+# ax2[0, 0].set_title("Attitude Estimation")
+# ax2[0, 0].set_ylabel("roll (deg)")
+# ax2[1, 0].set_ylabel("pitch (deg)")
+# ax2[2, 0].set_ylabel("yaw (deg)")
+# # ax2[0, 0].set_ylim([-180.0, 180.0])
+# # ax2[1, 0].set_ylim([-180.0/2, 180.0/2])
+# # ax2[2, 0].set_ylim([-180.0, 180.0])
+# ax2[0, 1].set_title("Velocity Estimation")
+# ax2[0, 1].set_ylabel("x (m/s)")
+# ax2[1, 1].set_ylabel("y (m/s)")
+# ax2[2, 1].set_ylabel("z (m/s)")
+# ax2[0, 2].set_title("Position Estimation")
+# ax2[0, 2].set_ylabel("x (m)")
+# ax2[1, 2].set_ylabel("y (m)")
+# ax2[2, 2].set_ylabel("z (m)")
 
 # Auxiliary states
 fig3, ax3 = plt.subplots(3, 2, layout='constrained')
@@ -666,15 +669,15 @@ if args.animate:
     ani.save('INS_animation.mp4', fps=50)
 
 
-if args.extreme_initial:
-    fig.savefig("INS_observer_error_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
-    fig2.savefig("INS_estimation_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
-else:
-    fig.savefig("INS_observer_error_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
-    fig2.savefig("INS_estimation_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
-
-for i in plt.get_fignums():
-    fig = plt.figure(i)
-    fig.savefig(f"figure_{i}.png", dpi=300, bbox_inches='tight')
+# if args.extreme_initial:
+#     fig.savefig("INS_observer_error_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
+#     fig2.savefig("INS_estimation_extreme.pdf", bbox_inches = 'tight', pad_inches = 0.02)
+# else:
+#     fig.savefig("INS_observer_error_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
+#     fig2.savefig("INS_estimation_standard.pdf", bbox_inches = 'tight', pad_inches = 0.02)
+if args.save_figs:
+    for i in plt.get_fignums():
+        fig = plt.figure(i)
+        fig.savefig(f"figs/figure_{i}.png", dpi=300, bbox_inches='tight')
 
 plt.show()
